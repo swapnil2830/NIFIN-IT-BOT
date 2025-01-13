@@ -12,7 +12,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { nord } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 import styles from './Chat.module.css'
-import Contoso from '../../assets/Contoso.svg'
+import Azure from '../../assets/Azure.svg'
 import { XSSAllowTags } from '../../constants/sanatizeAllowables'
 
 import {
@@ -108,7 +108,7 @@ const Chat = () => {
 
   useEffect(() => {
     if (!appStateContext?.state.isLoading) {
-      setLogo(ui?.chat_logo || ui?.logo || Contoso)
+      setLogo(ui?.chat_logo || ui?.logo || Azure)
     }
   }, [appStateContext?.state.isLoading])
 
@@ -791,7 +791,7 @@ const Chat = () => {
           <div className={styles.chatContainer}>
             {!messages || messages.length < 1 ? (
               <Stack className={styles.chatEmptyState}>
-                <img src={logo} className={styles.chatIcon} aria-hidden="true" />
+                <img src={Azure} className={styles.chatIcon} aria-hidden="true" />
                 <h1 className={styles.chatEmptyStateTitle}>{ui?.chat_title}</h1>
                 <h2 className={styles.chatEmptyStateSubtitle}>{ui?.chat_description}</h2>
               </Stack>
