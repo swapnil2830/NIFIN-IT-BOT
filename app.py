@@ -5,11 +5,11 @@ import os
 app = Flask(__name__)
 
 # Replace with your external API endpoint or logic
-EXTERNAL_API_URL = "https://ns-azai-svc.openai.azure.com/"
+EXTERNAL_API_URL = "https://ns-AZAI-svc.openai.azure.com/openai/deployments/gpt-4o-mini/completions?api-version=2023-03-15"
 response = requests.post(
     EXTERNAL_API_URL,
     headers={
-        "Authorization": f"Bearer {os.getenv('AZURE_API_KEY')}",
+        "Authorization": f"Bearer {os.getenv('4QfGXH6AG2PHuSHwcieFhvmKgCIVmlZD0WqkzlPJYViEvN5TWEA2JQQJ99ALACHrzpqXJ3w3AAAAACOG1Iss')}",
         "Content-Type": "application/json",
     },
     json={
