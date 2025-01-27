@@ -110,6 +110,56 @@ frontend_settings = {
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
+@bp.route("/google-chat/webhook", methods=["POST"])
+async def google_chat_webhook():
+    try:
+        request_json = await request.get_json()
+        event_type = request_json.get("type")
+
+        if event_type == "MESSAGE":
+            user_message = request_json.get("message", {}).get("text", "")
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+            response_text = await handle_google_chat_message(user_message, user_name)
+            return jsonify({
+                "text": response_text
+            })
+        elif event_type == "ADDED_TO_SPACE":
+            space_name = request_json.get("space", {}).get("name", "unknown space")
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}!"
+            })
+        elif event_type == "REMOVED_FROM_SPACE":
+            return jsonify({})  # Handle bot removal logic if necessary
+        else:
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
+
+    except Exception as e:
+        logging.exception("Error handling Google Chat webhook")
+        return jsonify({"error": str(e)}), 500
+
+
+async def handle_google_chat_message(user_message, user_name):
+    """
+    Process the user's message and return a response.
+    This function can integrate with the Azure OpenAI chat logic in your app.
+    """
+    # Example: Forward the user message to Azure OpenAI for response
+    try:
+        azure_openai_client = await init_openai_client()
+        response = await azure_openai_client.chat.completions.create(
+            model=app_settings.azure_openai.model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=150
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.exception("Error in Azure OpenAI response")
+        return "Sorry, I couldn't process your message."
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
