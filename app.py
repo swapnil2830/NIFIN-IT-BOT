@@ -110,9 +110,8 @@ frontend_settings = {
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
-@bp.route("/webhook", methods=["GET", "POST"])
+@bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
-    if request.method == "GET":
     return jsonify({
                 "text": "Hello"
             })
