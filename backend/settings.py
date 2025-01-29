@@ -101,11 +101,11 @@ class _AzureOpenAISettings(BaseSettings):
         env_ignore_empty=True
     )
     
-    model: str
-    key: Optional[str] = None
-    resource: Optional[str] = None
-    endpoint: Optional[str] = None
-    temperature: float = 0
+    model: str = "gpt-4o-mini"
+    key: Optional[str] = os.getenv("AZURE_OPENAI_KEY", "4QfGXH6AG2PHuSHwcieFhvmKgCIVmlZD0WqkzlPJYViEvN5TWEA2JQQJ99ALACHrzpqXJ3w3AAAAACOG1Iss")
+    resource: Optional[str] = os.getenv("AZURE_OPENAI_RESOURCE", "ns-azai-svc")
+    endpoint: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT", "https://ns-azai-svc.openai.azure.com/")
+    temperature: float = 0.5
     top_p: float = 0
     max_tokens: int = 1000
     stream: bool = True
