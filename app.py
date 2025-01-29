@@ -112,9 +112,6 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
-    return jsonify({
-                "text": "Hello"
-            })
     try:
         request_json = await request.get_json()
         event_type = request_json.get("type")
