@@ -113,13 +113,12 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        # 🔹 Log Headers to compare Microsoft vs Google OAuth requests
+        # 🔍 Log Headers and Request JSON
         request_headers = dict(request.headers)
-        logging.info(f"🔍 Request Headers: {request_headers}")
-
-        # 🔹 Log Full Request JSON from Google Chat API
         request_json = await request.get_json()
+        
         logging.info(f"📩 Google Chat Webhook Request: {json.dumps(request_json, indent=4)}")
+        logging.info(f"🔍 Request Headers: {request_headers}")
 
         # 🔹 Check if Authorization Header is missing
         auth_header = request_headers.get("Authorization")
@@ -134,17 +133,15 @@ async def google_chat_webhook():
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
 
-            # 🔹 Log Incoming User Message
             logging.info(f"📩 User '{user_name}' sent message: {user_message}")
 
             # 🔹 Get Authenticated User Details (Important for Google OAuth)
             user_details = get_authenticated_user_details(request_headers)
             logging.info(f"🔐 Authenticated User Details: {user_details}")
 
-            # 🔹 Process AI response based on user's message
+            # 🔹 Process AI response
             response_text = await handle_google_chat_message(user_message, user_details)
 
-            # 🔹 Log AI Response
             logging.info(f"🤖 Response Sent: {response_text}")
 
             return jsonify({"text": response_text})
@@ -157,12 +154,12 @@ async def google_chat_webhook():
             return jsonify({})  # Handle bot removal logic if necessary
 
         else:
+            logging.error("⚠️ Unknown event type received")
             return jsonify({"text": "🤔 I didn't understand that event type."})
 
     except Exception as e:
         logging.exception("❌ Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
-
 
 async def handle_google_chat_message(user_message, user_details):
     """
@@ -172,29 +169,35 @@ async def handle_google_chat_message(user_message, user_details):
     try:
         azure_openai_client = await init_openai_client()
 
-        # 🔹 Step 1: Retrieve Indexed Policies from Azure AI Search
+        # 🔍 Fetch Indexed Policies from Azure Search
+        logging.info(f"🔍 Fetching indexed policies for query: {user_message}")
+
         formatted_query = {
-            "search": user_message,  # Search user input in indexed documents
+            "search": user_message,
             "top": 5,  # Limit number of results
             "searchFields": "content",
         }
         search_results = await call_azure_search(formatted_query)
 
-        # 🔹 Step 2: Log AI Search Results
-        logging.info(f"📖 Retrieved Search Results: {search_results}")
+        # 🔹 Log Search Results
+        if search_results:
+            logging.info(f"📖 Retrieved Search Results: {search_results}")
+        else:
+            logging.warning("⚠️ No relevant search results found.")
 
-        # 🔹 Step 3: Modify OpenAI Query with Indexed Policies
+        # 🔹 Modify OpenAI Query with Indexed Policies
         messages = [
             {"role": "system", "content": "You are an AI assistant providing IT-related support."},
             {"role": "user", "content": user_message}
         ]
 
-        # 🔹 If search results exist, pass them to OpenAI
         if search_results:
             context_text = "\n".join([doc["content"] for doc in search_results])
             messages.append({"role": "system", "content": f"Relevant policies:\n{context_text}"})
 
-        # 🔹 Step 4: Call OpenAI with Indexed Data
+        # 🔹 Call OpenAI
+        logging.info(f"🤖 Sending query to OpenAI: {messages}")
+
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
             messages=messages,
@@ -202,13 +205,14 @@ async def handle_google_chat_message(user_message, user_details):
         )
 
         response_text = response.choices[0].message.content.strip()
-        logging.info(f"🤖 AI Response: {response_text}")
+        logging.info(f"✅ OpenAI Response: {response_text}")
 
         return response_text
 
     except Exception as e:
         logging.exception("❌ Error in Azure OpenAI response")
         return "Sorry, I couldn't process your message."
+
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
