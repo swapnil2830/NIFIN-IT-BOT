@@ -113,106 +113,53 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        # 🔍 Log Headers and Request JSON
-        request_headers = dict(request.headers)
         request_json = await request.get_json()
-        
-        logging.info(f"📩 Google Chat Webhook Request: {json.dumps(request_json, indent=4)}")
-        logging.info(f"🔍 Request Headers: {request_headers}")
-
-        # 🔹 Check if Authorization Header is missing
-        auth_header = request_headers.get("Authorization")
-        if not auth_header:
-            logging.warning("⚠️ Missing Authorization Header")
-            return jsonify({"error": "Unauthorized"}), 401
-
-        # 🔹 Extract the event type from the request
         event_type = request_json.get("type")
 
         if event_type == "MESSAGE":
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
-
-            logging.info(f"📩 User '{user_name}' sent message: {user_message}")
-
-            # 🔹 Get Authenticated User Details (Important for Google OAuth)
-            user_details = get_authenticated_user_details(request_headers)
-            logging.info(f"🔐 Authenticated User Details: {user_details}")
-
-            # 🔹 Process AI response
-            response_text = await handle_google_chat_message(user_message, user_details)
-
-            logging.info(f"🤖 Response Sent: {response_text}")
-
-            return jsonify({"text": response_text})
-
+            response_text = await handle_google_chat_message(user_message, user_name)
+            return jsonify({
+                "text": response_text
+            })
         elif event_type == "ADDED_TO_SPACE":
             space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({"text": f"✅ Thanks for adding me to {space_name}!"})
-
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}!"
+            })
         elif event_type == "REMOVED_FROM_SPACE":
             return jsonify({})  # Handle bot removal logic if necessary
-
         else:
-            logging.error("⚠️ Unknown event type received")
-            return jsonify({"text": "🤔 I didn't understand that event type."})
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
 
     except Exception as e:
-        logging.exception("❌ Error handling Google Chat webhook")
+        logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
 
-async def handle_google_chat_message(user_message, user_details):
+
+async def handle_google_chat_message(user_message, user_name):
     """
     Process the user's message and return a response.
-    This function integrates with Azure OpenAI & Search.
+    This function can integrate with the Azure OpenAI chat logic in your app.
     """
+    # Example: Forward the user message to Azure OpenAI for response
     try:
         azure_openai_client = await init_openai_client()
-
-        # 🔍 Fetch Indexed Policies from Azure Search
-        logging.info(f"🔍 Fetching indexed policies for query: {user_message}")
-
-        formatted_query = {
-            "search": user_message,
-            "top": 5,  # Limit number of results
-            "searchFields": "content",
-        }
-        search_results = await call_azure_search(formatted_query)
-
-        # 🔹 Log Search Results
-        if search_results:
-            logging.info(f"📖 Retrieved Search Results: {search_results}")
-        else:
-            logging.warning("⚠️ No relevant search results found.")
-
-        # 🔹 Modify OpenAI Query with Indexed Policies
-        messages = [
-            {"role": "system", "content": "You are an AI assistant providing IT-related support."},
-            {"role": "user", "content": user_message}
-        ]
-
-        if search_results:
-            context_text = "\n".join([doc["content"] for doc in search_results])
-            messages.append({"role": "system", "content": f"Relevant policies:\n{context_text}"})
-
-        # 🔹 Call OpenAI
-        logging.info(f"🤖 Sending query to OpenAI: {messages}")
-
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
-            messages=messages,
-            max_tokens=200
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=150
         )
-
-        response_text = response.choices[0].message.content.strip()
-        logging.info(f"✅ OpenAI Response: {response_text}")
-
-        return response_text
-
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        logging.exception("❌ Error in Azure OpenAI response")
+        logging.exception("Error in Azure OpenAI response")
         return "Sorry, I couldn't process your message."
-
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
@@ -275,27 +222,6 @@ async def init_openai_client():
         logging.exception("Exception in Azure OpenAI initialization", e)
         azure_openai_client = None
         raise e
-
-async def call_azure_search(query):
-    """
-    Calls Azure Cognitive Search to fetch indexed company policies.
-    """
-    import httpx
-    headers = {
-        "Content-Type": "application/json",
-        "api-key": os.getenv("AZURE_SEARCH_KEY")  # Ensure this is set in Azure
-    }
-
-    search_url = f"https://{app_settings.azure_search.service}.search.windows.net/indexes/{app_settings.azure_search.index}/docs/search?api-version=2023-07-01"
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(search_url, headers=headers, json=query)
-
-        if response.status_code == 200:
-            return response.json().get("value", [])  # Extract documents
-        else:
-            logging.error(f"❌ Azure Search Error: {response.text}")
-            return None
 
 
 async def init_cosmosdb_client():
