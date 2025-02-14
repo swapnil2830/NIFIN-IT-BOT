@@ -5,6 +5,7 @@ import logging
 import uuid
 import httpx
 import asyncio
+import jwt
 from quart import (
     Blueprint,
     Quart,
@@ -40,6 +41,10 @@ bp = Blueprint("routes", __name__, static_folder="static", template_folder="stat
 
 cosmos_db_ready = asyncio.Event()
 
+# Load Google OAuth Environment Variables
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI")
+GOOGLE_JWKS_URI = "https://www.googleapis.com/oauth2/v3/certs"
 
 def create_app():
     app = Quart(__name__)
@@ -112,21 +117,29 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
+    """
+    Google Chat Webhook with JWT Validation
+    """
     try:
-        # Log headers to compare Microsoft vs Google requests
-        logging.info(f"Request Headers: {dict(request.headers)}")
-
-        # Log full request payload
-        request_json = await request.get_json()
-        logging.info(f"Google Chat Webhook Request: {json.dumps(request_json, indent=4)}")
-
-        # Log authentication details
+        # Get Authorization Header
         auth_header = request.headers.get("Authorization")
-        if not auth_header:
-            logging.warning("Missing Authorization Header")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            logging.warning("Missing or invalid Authorization header")
             return jsonify({"error": "Unauthorized"}), 401
 
+        token = auth_header.split("Bearer ")[-1]
+
+        # Validate JWT Token from Google
+        decoded_token = validate_google_jwt(token)
+        if not decoded_token:
+            return jsonify({"error": "Invalid token"}), 401
+
+        # Log User Info from Token
+        logging.info(f"Decoded JWT: {decoded_token}")
+
+        request_json = await request.get_json()
         event_type = request_json.get("type")
+
         if event_type == "MESSAGE":
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
@@ -134,60 +147,85 @@ async def google_chat_webhook():
             logging.info(f"User '{user_name}' sent message: {user_message}")
 
             response_text = await handle_google_chat_message(user_message, user_name)
-            logging.info(f"Response Sent: {response_text}")
-
             return jsonify({"text": response_text})
 
         else:
-            return jsonify({"text": "I didn't understand that event type."})
+            return jsonify({"text": "Unknown event type."})
 
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
         return jsonify({"error": str(e)}), 500
 
 
+def validate_google_jwt(token):
+    """
+    Validate Google OAuth JWT Token
+    """
+    try:
+        # Get Google's Public Keys (JWKS)
+        jwks = requests.get(GOOGLE_JWKS_URI).json()
+
+        # Decode JWT Token
+        decoded_token = jwt.decode(
+            token,
+            key=jwks,  # Google publishes these keys
+            algorithms=["RS256"],
+            audience=GOOGLE_CLIENT_ID,
+            issuer="https://accounts.google.com",
+            options={"verify_exp": True}
+        )
+        return decoded_token
+
+    except jwt.ExpiredSignatureError:
+        logging.error("JWT Token expired")
+        return None
+    except jwt.InvalidTokenError:
+        logging.error("Invalid JWT Token")
+        return None
+
+
 async def handle_google_chat_message(user_message, user_name):
     """
     Process the user's message and return a response.
-    This function integrates with Azure OpenAI & Search.
     """
     try:
         azure_openai_client = await init_openai_client()
-
-        # Retrieve authenticated user details
-        user_details = get_authenticated_user_details(request.headers)
-        logging.info(f"Authenticated User Details: {user_details}")
-
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
             messages=[
-                {"role": "system", "content": f"You are an AI assistant responding to {user_details.get('user_name', 'a user')}. Provide company policies if available."},
+                {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": user_message}
             ],
-            max_tokens=200
+            max_tokens=150
         )
-
-        response_text = response.choices[0].message.content.strip()
-        logging.info(f"Google Chat Response: {response_text}")
-
-        return response_text
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
         logging.exception("Error in Azure OpenAI response")
         return "Sorry, I couldn't process your message."
 
-# Initialize Azure OpenAI Client
+
 async def init_openai_client():
-    azure_openai_client = None
-    
+    """
+    Initialize Azure OpenAI Client
+    """
     try:
-        # API version check
-        if (
-            app_settings.azure_openai.preview_api_version
-            < MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
-        ):
-            raise ValueError(
-                f"The minimum supported Azure OpenAI preview API version is '{MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION}'"
+        endpoint = app_settings.azure_openai.endpoint or f"https://{app_settings.azure_openai.resource}.openai.azure.com/"
+        aoai_api_key = app_settings.azure_openai.key
+
+        azure_openai_client = AsyncAzureOpenAI(
+            api_version=app_settings.azure_openai.preview_api_version,
+            api_key=aoai_api_key,
+            azure_endpoint=endpoint,
+        )
+        return azure_openai_client
+
+    except Exception as e:
+        logging.exception("Exception in Azure OpenAI initialization", e)
+        return None
+
+
+app = create_app()
             )
 
         # Endpoint
