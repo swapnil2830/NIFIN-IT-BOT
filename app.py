@@ -172,12 +172,32 @@ async def handle_google_chat_message(user_message, user_details):
     try:
         azure_openai_client = await init_openai_client()
 
+        # 🔹 Step 1: Retrieve Indexed Policies from Azure AI Search
+        formatted_query = {
+            "search": user_message,  # Search user input in indexed documents
+            "top": 5,  # Limit number of results
+            "searchFields": "content",
+        }
+        search_results = await call_azure_search(formatted_query)
+
+        # 🔹 Step 2: Log AI Search Results
+        logging.info(f"📖 Retrieved Search Results: {search_results}")
+
+        # 🔹 Step 3: Modify OpenAI Query with Indexed Policies
+        messages = [
+            {"role": "system", "content": "You are an AI assistant providing IT-related support."},
+            {"role": "user", "content": user_message}
+        ]
+
+        # 🔹 If search results exist, pass them to OpenAI
+        if search_results:
+            context_text = "\n".join([doc["content"] for doc in search_results])
+            messages.append({"role": "system", "content": f"Relevant policies:\n{context_text}"})
+
+        # 🔹 Step 4: Call OpenAI with Indexed Data
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
-            messages=[
-                {"role": "system", "content": f"You are an IT assistant helping {user_details.get('user_name', 'a user')}. Provide company policies if available."},
-                {"role": "user", "content": user_message}
-            ],
+            messages=messages,
             max_tokens=200
         )
 
@@ -251,6 +271,27 @@ async def init_openai_client():
         logging.exception("Exception in Azure OpenAI initialization", e)
         azure_openai_client = None
         raise e
+
+async def call_azure_search(query):
+    """
+    Calls Azure Cognitive Search to fetch indexed company policies.
+    """
+    import httpx
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": os.getenv("AZURE_SEARCH_KEY")  # Ensure this is set in Azure
+    }
+
+    search_url = f"https://{app_settings.azure_search.service}.search.windows.net/indexes/{app_settings.azure_search.index}/docs/search?api-version=2023-07-01"
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(search_url, headers=headers, json=query)
+
+        if response.status_code == 200:
+            return response.json().get("value", [])  # Extract documents
+        else:
+            logging.error(f"❌ Azure Search Error: {response.text}")
+            return None
 
 
 async def init_cosmosdb_client():
