@@ -113,27 +113,33 @@ MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "
 @bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     try:
-        request_json = await request.get_json()
-        event_type = request_json.get("type")
+        # Log headers to compare Microsoft vs Google requests
+        logging.info(f"Request Headers: {dict(request.headers)}")
 
+        # Log full request payload
+        request_json = await request.get_json()
+        logging.info(f"Google Chat Webhook Request: {json.dumps(request_json, indent=4)}")
+
+        # Log authentication details
+        auth_header = request.headers.get("Authorization")
+        if not auth_header:
+            logging.warning("Missing Authorization Header")
+            return jsonify({"error": "Unauthorized"}), 401
+
+        event_type = request_json.get("type")
         if event_type == "MESSAGE":
             user_message = request_json.get("message", {}).get("text", "")
             user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+
+            logging.info(f"User '{user_name}' sent message: {user_message}")
+
             response_text = await handle_google_chat_message(user_message, user_name)
-            return jsonify({
-                "text": response_text
-            })
-        elif event_type == "ADDED_TO_SPACE":
-            space_name = request_json.get("space", {}).get("name", "unknown space")
-            return jsonify({
-                "text": f"Thanks for adding me to {space_name}!"
-            })
-        elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({})  # Handle bot removal logic if necessary
+            logging.info(f"Response Sent: {response_text}")
+
+            return jsonify({"text": response_text})
+
         else:
-            return jsonify({
-                "text": "I didn't understand that event type."
-            })
+            return jsonify({"text": "I didn't understand that event type."})
 
     except Exception as e:
         logging.exception("Error handling Google Chat webhook")
@@ -143,20 +149,29 @@ async def google_chat_webhook():
 async def handle_google_chat_message(user_message, user_name):
     """
     Process the user's message and return a response.
-    This function can integrate with the Azure OpenAI chat logic in your app.
+    This function integrates with Azure OpenAI & Search.
     """
-    # Example: Forward the user message to Azure OpenAI for response
     try:
         azure_openai_client = await init_openai_client()
+
+        # Retrieve authenticated user details
+        user_details = get_authenticated_user_details(request.headers)
+        logging.info(f"Authenticated User Details: {user_details}")
+
         response = await azure_openai_client.chat.completions.create(
             model=app_settings.azure_openai.model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": f"You are an AI assistant responding to {user_details.get('user_name', 'a user')}. Provide company policies if available."},
                 {"role": "user", "content": user_message}
             ],
-            max_tokens=150
+            max_tokens=200
         )
-        return response.choices[0].message.content.strip()
+
+        response_text = response.choices[0].message.content.strip()
+        logging.info(f"Google Chat Response: {response_text}")
+
+        return response_text
+
     except Exception as e:
         logging.exception("Error in Azure OpenAI response")
         return "Sorry, I couldn't process your message."
@@ -398,6 +413,10 @@ async def send_chat_request(request_body, request_headers):
     try:
         azure_openai_client = await init_openai_client()
         raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
+
+        logging.info(f"OpenAI API Request: {json.dumps(model_args, indent=4)}")
+        logging.info(f"Authentication Headers: {dict(request_headers)}")
+
         response = raw_response.parse()
         apim_request_id = raw_response.headers.get("apim-request-id") 
     except Exception as e:
@@ -405,6 +424,7 @@ async def send_chat_request(request_body, request_headers):
         raise e
 
     return response, apim_request_id
+
 
 
 async def complete_chat_request(request_body, request_headers):
