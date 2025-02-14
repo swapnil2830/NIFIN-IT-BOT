@@ -170,7 +170,7 @@ def validate_google_jwt(token):
             token,
             key=jwks,  # Google publishes these keys
             algorithms=["RS256"],
-            audience=GOOGLE_CLIENT_ID,
+            audience=562716200508-gvpcs3bsfriahvu7qvq1mkl5lcbh18lb.apps.googleusercontent.com,
             issuer="https://accounts.google.com",
             options={"verify_exp": True}
         )
