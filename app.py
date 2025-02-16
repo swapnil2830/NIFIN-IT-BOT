@@ -840,65 +840,48 @@ async def generate_title(conversation_messages) -> str:
 ################################################################################
 @bp.route("/chatbot/google", methods=["POST"])
 async def google_chat_webhook():
-    """
-    1. Receives an event from Google Chat (JSON).
-    2. Checks if the user is authenticated (Azure AD).
-    3. Forwards the user message to your existing conversation logic.
-    4. Returns JSON in the format {"text": "..."} back to Google Chat.
-    """
     try:
-        # 1. Parse the incoming JSON payload from Google Chat
         data = await request.get_json()
-        logging.debug(f"Google Chat Webhook Payload: {json.dumps(data, indent=2)}")
-
         event_type = data.get("type", "")
-        if event_type == "ADDED_TO_SPACE":
-            return jsonify({"text": "Hello! I've been added to this space. How can I help you?"})
+        
+        if event_type == "MESSAGE":
+            # 1. Force non-streaming just for Google Chat
+            original_stream_setting = app_settings.azure_openai.stream
+            app_settings.azure_openai.stream = False
 
-        elif event_type == "REMOVED_FROM_SPACE":
-            return jsonify({"text": "Goodbye! I've been removed from the space."})
+            try:
+                # 2. (same code as before)
+                authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+                if not authenticated_user:
+                    return jsonify({"text": "You are not authenticated via Azure AD."})
 
-        elif event_type == "MESSAGE":
-            user_message = data["message"].get("text", "").strip()
-            if not user_message:
-                return jsonify({"text": "I didn't catch that. Please type something."})
+                request_json = {
+                    "messages": [
+                        {"role": "user", "content": data["message"]["text"], "id": str(uuid.uuid4())}
+                    ]
+                }
+                conversation_response = await conversation_internal(request_json, request.headers)
 
-            # 2. Attempt to authenticate the user via Azure AD
-            authenticated_user = get_authenticated_user_details(request_headers=request.headers)
-            if not authenticated_user:
-                return jsonify({"text": "You are not authenticated via Azure AD. Please sign in."})
+                # 3. Because we disabled streaming, conversation_internal() should return JSON
+                if conversation_response.is_json:
+                    response_json = await conversation_response.get_json()
+                    # Typically you'll see something like response_json["content"]
+                    final_answer = response_json.get("content", "No response.")
+                    return jsonify({"text": final_answer})
+                else:
+                    # If for some reason it's still not JSON, read raw data
+                    raw_data = (await conversation_response.get_data()).decode("utf-8")
+                    return jsonify({"text": raw_data})
 
-            # 3. Forward the user message to your existing conversation logic
-            request_json = {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": user_message,
-                        "id": str(uuid.uuid4())
-                    }
-                ]
-            }
-            conversation_response = await conversation_internal(request_json, request.headers)
+            finally:
+                # 4. Restore the original streaming setting
+                app_settings.azure_openai.stream = original_stream_setting
 
-            # 4. The conversation_internal() returns a Quart Response, so let's parse it
-            if conversation_response.is_json:
-                # Non-streaming: parse the JSON
-                content_data = await conversation_response.get_json()
-                # Typically, your final response has "content" or similar
-                final_answer = content_data.get("content", "No response.")
-                return jsonify({"text": final_answer})
-            else:
-                # Possibly streaming (NDJSON). We can read the entire payload:
-                raw_data = (await conversation_response.get_data()).decode("utf-8")
-                return jsonify({"text": raw_data})
-
-        else:
-            # Catch-all for unknown or ping events
-            return jsonify({"text": f"Unhandled event type: {event_type}"})
-
+        # ... handle other event_types ...
     except Exception as e:
         logging.exception("Exception in Google Chat Webhook")
         return jsonify({"text": f"Error: {str(e)}"}), 500
+
 
 
 # Finally, create and expose the app
