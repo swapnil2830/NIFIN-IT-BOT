@@ -863,12 +863,21 @@ async def google_chat_webhook():
                 conversation_response = await conversation_internal(request_json, request.headers)
 
                 # 3. Because we disabled streaming, conversation_internal() should return JSON
-                if conversation_response.is_json:
-                    response_json = await conversation_response.get_json()
-                    # Typically you'll see something like response_json["content"]
-                    final_answer = response_json.get("content", "No response.")
-                    return jsonify({"text": final_answer})
-                else:
+               if conversation_response.is_json:
+    response_json = await conversation_response.get_json()
+
+    # --- Check for the usual "choices" structure ---
+    if "choices" in response_json and len(response_json["choices"]) > 0:
+        first_choice = response_json["choices"][0]
+        if "message" in first_choice and "content" in first_choice["message"]:
+            final_answer = first_choice["message"]["content"]
+        else:
+            final_answer = "No 'content' field in the first choice."
+    else:
+        final_answer = "No choices found in response."
+
+    return jsonify({"text": final_answer})
+else:
                     # If for some reason it's still not JSON, read raw data
                     raw_data = (await conversation_response.get_data()).decode("utf-8")
                     return jsonify({"text": raw_data})
