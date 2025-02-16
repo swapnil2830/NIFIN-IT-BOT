@@ -376,7 +376,7 @@ def get_frontend_settings():
         return jsonify({"error": str(e)}), 500
 
 # -- GOOGLE CHAT INTEGRATION ROUTE --
-@bp.route("/google_chat", methods=["POST"])
+@bp.route("/webhook", methods=["POST"])
 async def google_chat_webhook():
     """
     This endpoint is called by Google Chat whenever a user sends
