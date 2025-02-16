@@ -5,8 +5,6 @@ import logging
 import uuid
 import httpx
 import asyncio
-import jwt
-from jwt import PyJWKClient
 
 from quart import (
     Blueprint,
@@ -20,17 +18,13 @@ from quart import (
 )
 
 from openai import AsyncAzureOpenAI
-from azure.identity.aio import (
-    DefaultAzureCredential,
-    get_bearer_token_provider
-)
-
+from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from backend.auth.auth_utils import get_authenticated_user_details
 from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.history.cosmosdbservice import CosmosConversationClient
 from backend.settings import (
     app_settings,
-    MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
+    MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION,
 )
 from backend.utils import (
     format_as_ndjson,
@@ -41,14 +35,7 @@ from backend.utils import (
 )
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
-
 cosmos_db_ready = asyncio.Event()
-
-# Environment variables for Google Chat validation
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID") or "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
-# If your Chat token has iss=chat@system.gserviceaccount.com, set that as default or override via env
-GOOGLE_ISSUER = os.environ.get("GOOGLE_ISSUER", "chat@system.gserviceaccount.com")
-GOOGLE_JWKS_URI = "https://www.googleapis.com/oauth2/v3/certs"
 
 def create_app():
     app = Quart(__name__)
@@ -67,37 +54,6 @@ def create_app():
 
     return app
 
-app = create_app()
-
-# Debug settings
-DEBUG = os.environ.get("DEBUG", "false")
-if DEBUG.lower() == "true":
-    logging.basicConfig(level=logging.DEBUG)
-
-USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
-
-frontend_settings = {
-    "auth_enabled": app_settings.base_settings.auth_enabled,
-    "feedback_enabled": (
-        app_settings.chat_history and
-        app_settings.chat_history.enable_feedback
-    ),
-    "ui": {
-        "title": app_settings.ui.title,
-        "logo": app_settings.ui.logo,
-        "chat_logo": app_settings.ui.chat_logo or app_settings.ui.logo,
-        "chat_title": app_settings.ui.chat_title,
-        "chat_description": app_settings.ui.chat_description,
-        "show_share_button": app_settings.ui.show_share_button,
-        "show_chat_history_button": app_settings.ui.show_chat_history_button,
-    },
-    "sanitize_answer": app_settings.base_settings.sanitize_answer,
-    "oyd_enabled": app_settings.base_settings.datasource_type,
-}
-
-# Enable Microsoft Defender for Cloud
-MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
-
 @bp.route("/")
 async def index():
     return await render_template(
@@ -114,118 +70,96 @@ async def favicon():
 async def assets(path):
     return await send_from_directory("static/assets", path)
 
-@bp.route("/webhook", methods=["POST"])
-async def google_chat_webhook():
-    """
-    Google Chat Webhook with JWT Validation
-    """
-    try:
-        # Get Auth header
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            logging.warning("Missing or invalid Authorization header")
-            return jsonify({"error": "Unauthorized"}), 401
+# Debug settings
+DEBUG = os.environ.get("DEBUG", "false")
+if DEBUG.lower() == "true":
+    logging.basicConfig(level=logging.DEBUG)
 
-        token = auth_header.split("Bearer ")[-1]
+USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
 
-        # Validate JWT from Google Chat
-        decoded_token = validate_google_jwt(token)
-        if not decoded_token:
-            return jsonify({"error": "Invalid token"}), 401
+# Frontend Settings via Environment Variables
+frontend_settings = {
+    "auth_enabled": app_settings.base_settings.auth_enabled,
+    "feedback_enabled": (
+        app_settings.chat_history and app_settings.chat_history.enable_feedback
+    ),
+    "ui": {
+        "title": app_settings.ui.title,
+        "logo": app_settings.ui.logo,
+        "chat_logo": app_settings.ui.chat_logo or app_settings.ui.logo,
+        "chat_title": app_settings.ui.chat_title,
+        "chat_description": app_settings.ui.chat_description,
+        "show_share_button": app_settings.ui.show_share_button,
+        "show_chat_history_button": app_settings.ui.show_chat_history_button,
+    },
+    "sanitize_answer": app_settings.base_settings.sanitize_answer,
+    "oyd_enabled": app_settings.base_settings.datasource_type,
+}
 
-        request_json = await request.get_json()
-        event_type = request_json.get("type", "")
+# Enable Microsoft Defender for Cloud Integration
+MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
-        if event_type == "MESSAGE":
-            user_message = request_json.get("message", {}).get("text", "")
-            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
-            logging.info(f"User '{user_name}' sent message: {user_message}")
-
-            response_text = await handle_google_chat_message(user_message, user_name)
-            return jsonify({"text": response_text}), 200
-
-        elif event_type in ("ADDED_TO_SPACE", "REMOVED_FROM_SPACE", "CARD_CLICKED"):
-            logging.info(f"Handling event type '{event_type}' from Chat.")
-            return jsonify({"text": f"Handled event type: {event_type}"}), 200
-
-        else:
-            logging.info(f"Unknown event type: {event_type}")
-            return jsonify({"text": "Unknown event type."}), 200
-
-    except Exception as e:
-        logging.exception("Error handling Google Chat webhook")
-        return jsonify({"error": str(e)}), 500
-
-def validate_google_jwt(token: str):
-    """
-    Validate Google Chat-signed JWT using PyJWKClient.
-    If the token is valid, return the decoded claims. Otherwise, return None.
-    """
-    try:
-        jwk_client = PyJWKClient(GOOGLE_JWKS_URI)
-        signing_key = jwk_client.get_signing_key_from_jwt(token)
-
-        decoded_token = jwt.decode(
-            token,
-            key=signing_key.key,
-            algorithms=["RS256"],
-            audience=GOOGLE_CLIENT_ID,
-            issuer=GOOGLE_ISSUER,
-            options={"verify_exp": True}
-        )
-        return decoded_token
-    except jwt.ExpiredSignatureError:
-        logging.error("Google Chat JWT token expired.")
-        return None
-    except jwt.InvalidTokenError as ex:
-        logging.error(f"Invalid token error: {ex}")
-        return None
-
-async def handle_google_chat_message(user_message, user_name):
-    """
-    Process the user's message and return an Azure OpenAI-based response.
-    """
-    try:
-        azure_openai_client = await init_openai_client()
-        response = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": user_message}
-            ],
-            max_tokens=150
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logging.exception("Error in Azure OpenAI response")
-        return "Sorry, I couldn't process your message."
-
+# Initialize Azure OpenAI Client
 async def init_openai_client():
-    """
-    Initialize Azure OpenAI client with env settings
-    """
+    azure_openai_client = None
     try:
-        endpoint = app_settings.azure_openai.endpoint or f"https://{app_settings.azure_openai.resource}.openai.azure.com/"
-        aoai_api_key = app_settings.azure_openai.key
-        # If there's no API key, you might use Azure AD token-based auth instead.
+        # API version check
+        if (
+            app_settings.azure_openai.preview_api_version
+            < MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
+        ):
+            raise ValueError(
+                f"The minimum supported Azure OpenAI preview API version is '{MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION}'"
+            )
 
-        return AsyncAzureOpenAI(
+        # Endpoint
+        if (not app_settings.azure_openai.endpoint and not app_settings.azure_openai.resource):
+            raise ValueError("AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_RESOURCE is required")
+
+        endpoint = (
+            app_settings.azure_openai.endpoint
+            if app_settings.azure_openai.endpoint
+            else f"https://{app_settings.azure_openai.resource}.openai.azure.com/"
+        )
+
+        # Authentication
+        aoai_api_key = app_settings.azure_openai.key
+        ad_token_provider = None
+        if not aoai_api_key:
+            logging.debug("No AZURE_OPENAI_KEY found, using Azure Entra ID auth")
+            async with DefaultAzureCredential() as credential:
+                ad_token_provider = get_bearer_token_provider(
+                    credential, "https://cognitiveservices.azure.com/.default"
+                )
+
+        # Deployment
+        deployment = app_settings.azure_openai.model
+        if not deployment:
+            raise ValueError("AZURE_OPENAI_MODEL is required")
+
+        # Default Headers
+        default_headers = {"x-ms-useragent": USER_AGENT}
+
+        azure_openai_client = AsyncAzureOpenAI(
             api_version=app_settings.azure_openai.preview_api_version,
             api_key=aoai_api_key,
+            azure_ad_token_provider=ad_token_provider,
+            default_headers=default_headers,
             azure_endpoint=endpoint,
         )
+        return azure_openai_client
     except Exception as e:
-        logging.exception("Exception initializing Azure OpenAI client", e)
-        return None
+        logging.exception("Exception in Azure OpenAI initialization", e)
+        azure_openai_client = None
+        raise e
 
 async def init_cosmosdb_client():
-    """
-    Initialize Cosmos DB client for conversation history
-    """
     cosmos_conversation_client = None
     if app_settings.chat_history:
         try:
-            cosmos_endpoint = f"https://{app_settings.chat_history.account}.documents.azure.com:443/"
+            cosmos_endpoint = (
+                f"https://{app_settings.chat_history.account}.documents.azure.com:443/"
+            )
 
             if not app_settings.chat_history.account_key:
                 async with DefaultAzureCredential() as cred:
@@ -250,18 +184,11 @@ async def init_cosmosdb_client():
     return cosmos_conversation_client
 
 def prepare_model_args(request_body, request_headers):
-    """
-    Utility to build chat request arguments for Azure OpenAI.
-    """
     request_messages = request_body.get("messages", [])
     messages = []
     if not app_settings.datasource:
-        # system prompt if desired
         messages = [
-            {
-                "role": "system",
-                "content": app_settings.azure_openai.system_message
-            }
+            {"role": "system", "content": app_settings.azure_openai.system_message}
         ]
 
     for message in request_messages:
@@ -269,19 +196,10 @@ def prepare_model_args(request_body, request_headers):
             if message["role"] == "assistant" and "context" in message:
                 context_obj = json.loads(message["context"])
                 messages.append(
-                    {
-                        "role": message["role"],
-                        "content": message["content"],
-                        "context": context_obj
-                    }
+                    {"role": message["role"], "content": message["content"], "context": context_obj}
                 )
             else:
-                messages.append(
-                    {
-                        "role": message["role"],
-                        "content": message["content"]
-                    }
-                )
+                messages.append({"role": message["role"], "content": message["content"]})
 
     user_json = None
     if MS_DEFENDER_ENABLED:
@@ -289,10 +207,7 @@ def prepare_model_args(request_body, request_headers):
         conversation_id = request_body.get("conversation_id", None)
         application_name = app_settings.ui.title
         user_json = get_msdefender_user_json(
-            authenticated_user_details,
-            request_headers,
-            conversation_id,
-            application_name
+            authenticated_user_details, request_headers, conversation_id, application_name
         )
 
     model_args = {
@@ -303,10 +218,9 @@ def prepare_model_args(request_body, request_headers):
         "stop": app_settings.azure_openai.stop_sequence,
         "stream": app_settings.azure_openai.stream,
         "model": app_settings.azure_openai.model,
-        "user": user_json
+        "user": user_json,
     }
 
-    # For retrieval augmentation or data source usage
     if app_settings.datasource:
         model_args["extra_body"] = {
             "data_sources": [
@@ -314,7 +228,6 @@ def prepare_model_args(request_body, request_headers):
             ]
         }
 
-    # Redacted logs
     model_args_clean = copy.deepcopy(model_args)
     if model_args_clean.get("extra_body"):
         secret_params = [
@@ -324,73 +237,72 @@ def prepare_model_args(request_body, request_headers):
             "encoded_api_key",
             "api_key",
         ]
-        # Hide secrets in logs
-        ds_params = model_args_clean["extra_body"]["data_sources"][0]["parameters"]
         for secret_param in secret_params:
-            if ds_params.get(secret_param):
-                ds_params[secret_param] = "*****"
-        auth_obj = ds_params.get("authentication", {})
-        for field in auth_obj:
+            if model_args_clean["extra_body"]["data_sources"][0]["parameters"].get(secret_param):
+                model_args_clean["extra_body"]["data_sources"][0]["parameters"][secret_param] = "*****"
+        authentication = model_args_clean["extra_body"]["data_sources"][0]["parameters"].get(
+            "authentication", {}
+        )
+        for field in authentication:
             if field in secret_params:
-                auth_obj[field] = "*****"
-        embed_dep = ds_params.get("embedding_dependency", {})
-        if "authentication" in embed_dep:
-            for field in embed_dep["authentication"]:
+                model_args_clean["extra_body"]["data_sources"][0]["parameters"]["authentication"][
+                    field
+                ] = "*****"
+        embeddingDependency = model_args_clean["extra_body"]["data_sources"][0]["parameters"].get(
+            "embedding_dependency", {}
+        )
+        if "authentication" in embeddingDependency:
+            for field in embeddingDependency["authentication"]:
                 if field in secret_params:
-                    embed_dep["authentication"][field] = "*****"
+                    model_args_clean["extra_body"]["data_sources"][0]["parameters"][
+                        "embedding_dependency"
+                    ]["authentication"][field] = "*****"
 
     logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
     return model_args
 
-async def promptflow_request(request_data):
-    """
-    Example promptflow request
-    """
+async def promptflow_request(request):
     try:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {app_settings.promptflow.api_key}",
         }
+        logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
+
         async with httpx.AsyncClient(timeout=float(app_settings.promptflow.response_timeout)) as client:
-            pf_formatted = convert_to_pf_format(
-                request_data,
-                app_settings.promptflow.request_field_name,
-                app_settings.promptflow.response_field_name
+            pf_formatted_obj = convert_to_pf_format(
+                request, app_settings.promptflow.request_field_name, app_settings.promptflow.response_field_name
             )
             response = await client.post(
                 app_settings.promptflow.endpoint,
                 json={
-                    app_settings.promptflow.request_field_name: pf_formatted[-1]["inputs"][app_settings.promptflow.request_field_name],
-                    "chat_history": pf_formatted[:-1],
+                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1]["inputs"][
+                        app_settings.promptflow.request_field_name
+                    ],
+                    "chat_history": pf_formatted_obj[:-1],
                 },
                 headers=headers,
             )
         resp = response.json()
-        resp["id"] = request_data["messages"][-1]["id"]
+        resp["id"] = request["messages"][-1]["id"]
         return resp
     except Exception as e:
-        logging.error(f"An error occurred in promptflow_request: {e}")
+        logging.error(f"An error occurred while making promptflow_request: {e}")
 
 async def send_chat_request(request_body, request_headers):
-    """
-    Send user messages to Azure OpenAI, filter out 'tool' role messages, log request, return response
-    """
+    # Filter out 'tool' messages if present
     filtered_messages = []
     messages = request_body.get("messages", [])
-    for message in messages:
-        if message.get("role") != 'tool':
-            filtered_messages.append(message)
-    request_body['messages'] = filtered_messages
+    for m in messages:
+        if m.get("role") != "tool":
+            filtered_messages.append(m)
+    request_body["messages"] = filtered_messages
 
     model_args = prepare_model_args(request_body, request_headers)
 
     try:
         azure_openai_client = await init_openai_client()
         raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
-
-        logging.info(f"OpenAI API Request: {json.dumps(model_args, indent=4)}")
-        logging.info(f"Authentication Headers: {dict(request_headers)}")
-
         response = raw_response.parse()
         apim_request_id = raw_response.headers.get("apim-request-id")
     except Exception as e:
@@ -407,7 +319,7 @@ async def complete_chat_request(request_body, request_headers):
             response,
             history_metadata,
             app_settings.promptflow.response_field_name,
-            app_settings.promptflow.citations_field_name
+            app_settings.promptflow.citations_field_name,
         )
     else:
         response, apim_request_id = await send_chat_request(request_body, request_headers)
@@ -425,9 +337,6 @@ async def stream_chat_request(request_body, request_headers):
     return generate()
 
 async def conversation_internal(request_body, request_headers):
-    """
-    Common handler for chat conversations
-    """
     try:
         if app_settings.azure_openai.stream and not app_settings.base_settings.use_promptflow:
             result = await stream_chat_request(request_body, request_headers)
@@ -437,7 +346,7 @@ async def conversation_internal(request_body, request_headers):
             return response
         else:
             result = await complete_chat_request(request_body, request_headers)
-            return jsonify(result)
+            return result if isinstance(result, dict) else jsonify(result)
 
     except Exception as ex:
         logging.exception(ex)
@@ -451,7 +360,12 @@ async def conversation():
     if not request.is_json:
         return jsonify({"error": "request must be json"}), 415
     request_json = await request.get_json()
-    return await conversation_internal(request_json, request.headers)
+    result = await conversation_internal(request_json, request.headers)
+    # If conversation_internal already returns a response object, pass it through
+    if isinstance(result, tuple) or isinstance(result, str):
+        return result
+    # Otherwise we assume it's a normal JSON/dict
+    return jsonify(result)
 
 @bp.route("/frontend_settings", methods=["GET"])
 def get_frontend_settings():
@@ -461,10 +375,64 @@ def get_frontend_settings():
         logging.exception("Exception in /frontend_settings")
         return jsonify({"error": str(e)}), 500
 
-########################################
-#            HISTORY ENDPOINTS         #
-########################################
+# -- GOOGLE CHAT INTEGRATION ROUTE --
+@bp.route("/google_chat", methods=["POST"])
+async def google_chat_webhook():
+    """
+    This endpoint is called by Google Chat whenever a user sends
+    a message to your bot or an event occurs (e.g. ADDED_TO_SPACE).
+    """
+    data = await request.get_json()
+    event_type = data.get("type")
+    message_event = data.get("message", {})
+    user_message = message_event.get("text", "")
 
+    # 1. (Optional) Validate the request signature/JWT here if required
+    #    For example:
+    # auth_header = request.headers.get("Authorization", "")
+    # if not verify_google_jwt(auth_header):
+    #    return jsonify({"error": "Unauthorized"}), 401
+
+    # 2. Handle different event types from Google Chat
+    if event_type == "MESSAGE":
+        # The user typed something. Forward it to your GPT logic.
+        request_json = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ]
+        }
+        # Call your existing conversation logic
+        gpt_response = await conversation_internal(request_json, request.headers)
+
+        # conversation_internal might return a response object or dict
+        # If it's a direct response object (streaming), you need to handle that.
+        if isinstance(gpt_response, dict):
+            # The typical non-streaming response from format_non_streaming_response
+            # is something like { "id": ..., "role": "assistant", "content": ... }
+            bot_text = gpt_response.get("content", "Sorry, I got no response.")
+        else:
+            # If you got a streaming or error response, handle accordingly:
+            bot_text = "Sorry, an error occurred or streaming is not supported here."
+
+        # Return the message in Google Chat's JSON format
+        return jsonify({"text": bot_text})
+
+    elif event_type == "ADDED_TO_SPACE":
+        # Bot is added to a Chat space
+        return jsonify({"text": "Hello! I've joined the chat."})
+
+    elif event_type == "REMOVED_FROM_SPACE":
+        # Bot is removed from the space
+        return jsonify({}), 200
+
+    # Default fallback for unhandled event types
+    return jsonify({"text": "Event type not handled."}), 200
+# -- END GOOGLE CHAT ROUTE --
+
+# Conversation History APIs
 @bp.route("/history/generate", methods=["POST"])
 async def add_conversation():
     await cosmos_db_ready.wait()
@@ -490,11 +458,84 @@ async def add_conversation():
 
         messages = request_json["messages"]
         if len(messages) > 0 and messages[-1]["role"] == "user":
-            created_msg_val = await current_app.cosmos_conversation_client.create_message(
+            createdMessageValue = await current_app.cosmos_conversation_client.create_message(
                 uuid=str(uuid.uuid4()),
                 conversation_id=conversation_id,
                 user_id=user_id,
                 input_message=messages[-1],
             )
-            if created_msg_val == "Conversation not found":
-                raise Exception(
+            if createdMessageValue == "Conversation not found":
+                raise Exception("Conversation not found for the given ID.")
+        else:
+            raise Exception("No user message found")
+
+        request_body = await request.get_json()
+        history_metadata["conversation_id"] = conversation_id
+        request_body["history_metadata"] = history_metadata
+        return await conversation_internal(request_body, request.headers)
+    except Exception as e:
+        logging.exception("Exception in /history/generate")
+        return jsonify({"error": str(e)}), 500
+
+@bp.route("/history/update", methods=["POST"])
+async def update_conversation():
+    await cosmos_db_ready.wait()
+    authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+    user_id = authenticated_user["user_principal_id"]
+
+    request_json = await request.get_json()
+    conversation_id = request_json.get("conversation_id", None)
+
+    try:
+        if not current_app.cosmos_conversation_client:
+            raise Exception("CosmosDB is not configured or not working")
+        if not conversation_id:
+            raise Exception("No conversation_id found")
+
+        messages = request_json["messages"]
+        if len(messages) > 0 and messages[-1]["role"] == "assistant":
+            if len(messages) > 1 and messages[-2].get("role", None) == "tool":
+                await current_app.cosmos_conversation_client.create_message(
+                    uuid=str(uuid.uuid4()),
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    input_message=messages[-2],
+                )
+            await current_app.cosmos_conversation_client.create_message(
+                uuid=messages[-1]["id"],
+                conversation_id=conversation_id,
+                user_id=user_id,
+                input_message=messages[-1],
+            )
+        else:
+            raise Exception("No bot messages found")
+
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logging.exception("Exception in /history/update")
+        return jsonify({"error": str(e)}), 500
+
+@bp.route("/history/message_feedback", methods=["POST"])
+async def update_message():
+    await cosmos_db_ready.wait()
+    authenticated_user = get_authenticated_user_details(request_headers=request.headers)
+    user_id = authenticated_user["user_principal_id"]
+
+    request_json = await request.get_json()
+    message_id = request_json.get("message_id", None)
+    message_feedback = request_json.get("message_feedback", None)
+
+    try:
+        if not message_id:
+            return jsonify({"error": "message_id is required"}), 400
+        if not message_feedback:
+            return jsonify({"error": "message_feedback is required"}), 400
+
+        updated_message = await current_app.cosmos_conversation_client.update_message_feedback(
+            user_id, message_id, message_feedback
+        )
+        if updated_message:
+            return (
+                jsonify({
+                    "message": f"Successfully updated message with feedback {message_feedback}",
+  
