@@ -110,6 +110,56 @@ frontend_settings = {
 # Enable Microsoft Defender for Cloud Integration
 MS_DEFENDER_ENABLED = os.environ.get("MS_DEFENDER_ENABLED", "true").lower() == "true"
 
+@bp.route("/webhook", methods=["POST"])
+async def google_chat_webhook():
+    try:
+        request_json = await request.get_json()
+        event_type = request_json.get("type")
+
+        if event_type == "MESSAGE":
+            user_message = request_json.get("message", {}).get("text", "")
+            user_name = request_json.get("message", {}).get("sender", {}).get("displayName", "User")
+            response_text = await handle_google_chat_message(user_message, user_name)
+            return jsonify({
+                "text": response_text
+            })
+        elif event_type == "ADDED_TO_SPACE":
+            space_name = request_json.get("space", {}).get("name", "unknown space")
+            return jsonify({
+                "text": f"Thanks for adding me to {space_name}!"
+            })
+        elif event_type == "REMOVED_FROM_SPACE":
+            return jsonify({})  # Handle bot removal logic if necessary
+        else:
+            return jsonify({
+                "text": "I didn't understand that event type."
+            })
+
+    except Exception as e:
+        logging.exception("Error handling Google Chat webhook")
+        return jsonify({"error": str(e)}), 500
+
+
+async def handle_google_chat_message(user_message, user_name):
+    """
+    Process the user's message and return a response.
+    This function can integrate with the Azure OpenAI chat logic in your app.
+    """
+    # Example: Forward the user message to Azure OpenAI for response
+    try:
+        azure_openai_client = await init_openai_client()
+        response = await azure_openai_client.chat.completions.create(
+            model=app_settings.azure_openai.model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_message}
+            ],
+            max_tokens=150
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.exception("Error in Azure OpenAI response")
+        return "Sorry, I couldn't process your message."
 
 # Initialize Azure OpenAI Client
 async def init_openai_client():
@@ -185,6 +235,7 @@ async def init_cosmosdb_client():
             if not app_settings.chat_history.account_key:
                 async with DefaultAzureCredential() as cred:
                     credential = cred
+                    
             else:
                 credential = app_settings.chat_history.account_key
 
@@ -307,6 +358,7 @@ async def promptflow_request(request):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {app_settings.promptflow.api_key}",
         }
+        # Adding timeout for scenarios where response takes longer to come back
         logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
         async with httpx.AsyncClient(
             timeout=float(app_settings.promptflow.response_timeout)
@@ -316,6 +368,8 @@ async def promptflow_request(request):
                 app_settings.promptflow.request_field_name,
                 app_settings.promptflow.response_field_name
             )
+            # NOTE: This only support question and chat_history parameters
+            # If you need to add more parameters, you need to modify the request body
             response = await client.post(
                 app_settings.promptflow.endpoint,
                 json={
@@ -345,7 +399,7 @@ async def send_chat_request(request_body, request_headers):
         azure_openai_client = await init_openai_client()
         raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
         response = raw_response.parse()
-        apim_request_id = raw_response.headers.get("apim-request-id")
+        apim_request_id = raw_response.headers.get("apim-request-id") 
     except Exception as e:
         logging.exception("Exception in send_chat_request")
         raise e
@@ -425,13 +479,16 @@ async def add_conversation():
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
 
     try:
+        # make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
             raise Exception("CosmosDB is not configured or not working")
 
+        # check for the conversation_id, if the conversation is not set, we will create a new one
         history_metadata = {}
         if not conversation_id:
             title = await generate_title(request_json["messages"])
@@ -442,6 +499,8 @@ async def add_conversation():
             history_metadata["title"] = title
             history_metadata["date"] = conversation_dict["createdAt"]
 
+        ## Format the incoming message object in the "chat/completions" messages format
+        ## then write it to the conversation history in cosmos
         messages = request_json["messages"]
         if len(messages) > 0 and messages[-1]["role"] == "user":
             createdMessageValue = await current_app.cosmos_conversation_client.create_message(
@@ -459,6 +518,7 @@ async def add_conversation():
         else:
             raise Exception("No user message found")
 
+        # Submit request to Chat Completions for response
         request_body = await request.get_json()
         history_metadata["conversation_id"] = conversation_id
         request_body["history_metadata"] = history_metadata
@@ -475,25 +535,32 @@ async def update_conversation():
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
 
     try:
+        # make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
             raise Exception("CosmosDB is not configured or not working")
 
+        # check for the conversation_id, if the conversation is not set, we will create a new one
         if not conversation_id:
             raise Exception("No conversation_id found")
 
+        ## Format the incoming message object in the "chat/completions" messages format
+        ## then write it to the conversation history in cosmos
         messages = request_json["messages"]
         if len(messages) > 0 and messages[-1]["role"] == "assistant":
             if len(messages) > 1 and messages[-2].get("role", None) == "tool":
+                # write the tool message first
                 await current_app.cosmos_conversation_client.create_message(
                     uuid=str(uuid.uuid4()),
                     conversation_id=conversation_id,
                     user_id=user_id,
                     input_message=messages[-2],
                 )
+            # write the assistant message
             await current_app.cosmos_conversation_client.create_message(
                 uuid=messages[-1]["id"],
                 conversation_id=conversation_id,
@@ -503,6 +570,7 @@ async def update_conversation():
         else:
             raise Exception("No bot messages found")
 
+        # Submit request to Chat Completions for response
         response = {"success": True}
         return jsonify(response), 200
 
@@ -517,15 +585,18 @@ async def update_message():
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for message_id
     request_json = await request.get_json()
     message_id = request_json.get("message_id", None)
     message_feedback = request_json.get("message_feedback", None)
     try:
         if not message_id:
             return jsonify({"error": "message_id is required"}), 400
+
         if not message_feedback:
             return jsonify({"error": "message_feedback is required"}), 400
 
+        ## update the message in cosmos
         updated_message = await current_app.cosmos_conversation_client.update_message_feedback(
             user_id, message_id, message_feedback
         )
@@ -557,9 +628,11 @@ async def update_message():
 @bp.route("/history/delete", methods=["DELETE"])
 async def delete_conversation():
     await cosmos_db_ready.wait()
+    ## get the user id from the request headers
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
 
@@ -567,12 +640,16 @@ async def delete_conversation():
         if not conversation_id:
             return jsonify({"error": "conversation_id is required"}), 400
 
+        ## make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
             raise Exception("CosmosDB is not configured or not working")
 
+        ## delete the conversation messages from cosmos first
         deleted_messages = await current_app.cosmos_conversation_client.delete_messages(
             conversation_id, user_id
         )
+
+        ## Now delete the conversation
         deleted_conversation = await current_app.cosmos_conversation_client.delete_conversation(
             user_id, conversation_id
         )
@@ -598,14 +675,18 @@ async def list_conversations():
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## make sure cosmos is configured
     if not current_app.cosmos_conversation_client:
         raise Exception("CosmosDB is not configured or not working")
 
+    ## get the conversations from cosmos
     conversations = await current_app.cosmos_conversation_client.get_conversations(
         user_id, offset=offset, limit=25
     )
     if not isinstance(conversations, list):
         return jsonify({"error": f"No conversations for {user_id} were found"}), 404
+
+    ## return the conversation ids
 
     return jsonify(conversations), 200
 
@@ -616,18 +697,22 @@ async def get_conversation():
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
 
     if not conversation_id:
         return jsonify({"error": "conversation_id is required"}), 400
 
+    ## make sure cosmos is configured
     if not current_app.cosmos_conversation_client:
         raise Exception("CosmosDB is not configured or not working")
 
+    ## get the conversation object and the related messages from cosmos
     conversation = await current_app.cosmos_conversation_client.get_conversation(
         user_id, conversation_id
     )
+    ## return the conversation id and the messages in the bot frontend format
     if not conversation:
         return (
             jsonify(
@@ -638,10 +723,12 @@ async def get_conversation():
             404,
         )
 
+    # get the messages for the conversation from cosmos
     conversation_messages = await current_app.cosmos_conversation_client.get_messages(
         user_id, conversation_id
     )
 
+    ## format the messages in the bot frontend format
     messages = [
         {
             "id": msg["id"],
@@ -662,15 +749,18 @@ async def rename_conversation():
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
 
     if not conversation_id:
         return jsonify({"error": "conversation_id is required"}), 400
 
+    ## make sure cosmos is configured
     if not current_app.cosmos_conversation_client:
         raise Exception("CosmosDB is not configured or not working")
 
+    ## get the conversation from cosmos
     conversation = await current_app.cosmos_conversation_client.get_conversation(
         user_id, conversation_id
     )
@@ -684,6 +774,7 @@ async def rename_conversation():
             404,
         )
 
+    ## update the title
     title = request_json.get("title", None)
     if not title:
         return jsonify({"error": "title is required"}), 400
@@ -698,10 +789,13 @@ async def rename_conversation():
 @bp.route("/history/delete_all", methods=["DELETE"])
 async def delete_all_conversations():
     await cosmos_db_ready.wait()
+    ## get the user id from the request headers
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    # get conversations for user
     try:
+        ## make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
             raise Exception("CosmosDB is not configured or not working")
 
@@ -711,12 +805,16 @@ async def delete_all_conversations():
         if not conversations:
             return jsonify({"error": f"No conversations for {user_id} were found"}), 404
 
-        for c in conversations:
-            await current_app.cosmos_conversation_client.delete_messages(
-                c["id"], user_id
+        # delete each conversation
+        for conversation in conversations:
+            ## delete the conversation messages from cosmos first
+            deleted_messages = await current_app.cosmos_conversation_client.delete_messages(
+                conversation["id"], user_id
             )
-            await current_app.cosmos_conversation_client.delete_conversation(
-                user_id, c["id"]
+
+            ## Now delete the conversation
+            deleted_conversation = await current_app.cosmos_conversation_client.delete_conversation(
+                user_id, conversation["id"]
             )
         return (
             jsonify(
@@ -735,18 +833,23 @@ async def delete_all_conversations():
 @bp.route("/history/clear", methods=["POST"])
 async def clear_messages():
     await cosmos_db_ready.wait()
+    ## get the user id from the request headers
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
 
+    ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
 
     try:
         if not conversation_id:
             return jsonify({"error": "conversation_id is required"}), 400
+
+        ## make sure cosmos is configured
         if not current_app.cosmos_conversation_client:
             raise Exception("CosmosDB is not configured or not working")
 
+        ## delete the conversation messages from cosmos
         deleted_messages = await current_app.cosmos_conversation_client.delete_messages(
             conversation_id, user_id
         )
@@ -807,11 +910,8 @@ async def ensure_cosmos():
 
 
 async def generate_title(conversation_messages) -> str:
-    title_prompt = (
-        "Summarize the conversation so far into a 4-word or less title. "
-        "Do not use any quotation marks or punctuation. "
-        "Do not include any other commentary or description."
-    )
+    ## make sure the messages are sorted by _ts descending
+    title_prompt = "Summarize the conversation so far into a 4-word or less title. Do not use any quotation marks or punctuation. Do not include any other commentary or description."
 
     messages = [
         {"role": msg["role"], "content": msg["content"]}
@@ -829,69 +929,7 @@ async def generate_title(conversation_messages) -> str:
         return title
     except Exception as e:
         logging.exception("Exception while generating title", e)
-        # Fall back to the last user message if something goes wrong
-        if len(messages) > 1:
-            return messages[-2]["content"]
-        return "Untitled Conversation"
+        return messages[-2]["content"]
 
 
-################################################################################
-# Google Chat Webhook Route
-################################################################################
-@bp.route("/chatbot/google", methods=["POST"])
-async def google_chat_webhook():
-    try:
-        data = await request.get_json()
-        event_type = data.get("type", "")
-        
-        if event_type == "MESSAGE":
-            # 1. Force non-streaming just for Google Chat
-            original_stream_setting = app_settings.azure_openai.stream
-            app_settings.azure_openai.stream = False
-
-            try:
-                # 2. (same code as before)
-                authenticated_user = get_authenticated_user_details(request_headers=request.headers)
-                if not authenticated_user:
-                    return jsonify({"text": "You are not authenticated via Azure AD."})
-
-                request_json = {
-                    "messages": [
-                        {"role": "user", "content": data["message"]["text"], "id": str(uuid.uuid4())}
-                    ]
-                }
-                conversation_response = await conversation_internal(request_json, request.headers)
-
-                # 3. Because we disabled streaming, conversation_internal() should return JSON
-               if conversation_response.is_json:
-    response_json = await conversation_response.get_json()
-
-    # --- Check for the usual "choices" structure ---
-    if "choices" in response_json and len(response_json["choices"]) > 0:
-        first_choice = response_json["choices"][0]
-        if "message" in first_choice and "content" in first_choice["message"]:
-            final_answer = first_choice["message"]["content"]
-        else:
-            final_answer = "No 'content' field in the first choice."
-    else:
-        final_answer = "No choices found in response."
-
-    return jsonify({"text": final_answer})
-else:
-                    # If for some reason it's still not JSON, read raw data
-                    raw_data = (await conversation_response.get_data()).decode("utf-8")
-                    return jsonify({"text": raw_data})
-
-            finally:
-                # 4. Restore the original streaming setting
-                app_settings.azure_openai.stream = original_stream_setting
-
-        # ... handle other event_types ...
-    except Exception as e:
-        logging.exception("Exception in Google Chat Webhook")
-        return jsonify({"text": f"Error: {str(e)}"}), 500
-
-
-
-# Finally, create and expose the app
 app = create_app()
